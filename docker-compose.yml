@@ -1,0 +1,109 @@
+#
+# Copyright 2021 The Sigstore Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+services:
+  fulcio-server:
+    build:
+      context: .
+      target: "deploy"
+    command: [
+      "fulcio-server",
+      "serve",
+      "--host=0.0.0.0",
+      "--port=5555",
+      "--grpc-port=5554",
+      "--ca=fileca",
+      "--fileca-cert=/etc/fulcio/root.pem",
+      "--fileca-key=/etc/fulcio/root.key",
+      "--fileca-key-passwd=fulcio",
+      "--ct-log-url=http://tesseract:6962",
+      # Uncomment this for production logging
+      # "--log_type=prod",
+      ]
+    restart: always # keep the server running
+    ports:
+      - "5555:5555"
+      - "5554:5554"
+      - "${FULCIO_METRICS_PORT:-2112}:2112"
+    volumes:
+      - ~/.config/gcloud:/root/.config/gcloud/:z # for GCP authentication
+      - ${FULCIO_CONFIG:-./config/identity/config.yaml}:/etc/fulcio-config/config.yaml:z
+      - ./config/fulcio-root:/etc/fulcio:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5555/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      dex-idp:
+        condition: service_healthy
+    read_only: true
+  dex-idp:
+    build:
+      context: .
+      dockerfile: Dockerfile.dex-idp
+    user: root
+    command: [
+      "dex",
+      "serve",
+      "/etc/config/docker-compose-config.yaml",
+      ]
+    restart: always # keep the server running
+    ports:
+      - "8888:8888"
+    healthcheck:
+      test: ["CMD", "wget", "-O", "/dev/null", "http://localhost:8888/auth/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+  tesseract:
+    build:
+      context: .
+      dockerfile: Dockerfile.tesseract
+    volumes:
+      - ctStorage:/ctfe:z
+      - ./config/ctfe/:/etc/ctfe:ro
+      - ./config/fulcio-root:/etc/fulcio:ro
+    user: root
+    command: [
+        "--private_key", "/etc/ctfe/privkey.pem",
+        "--origin", "tesseract",
+        "--storage_dir", "/ctfe",
+        "--roots_pem_file", "/etc/fulcio/root.pem",
+        "--v", "1",
+        "--ext_key_usages", "CodeSigning",
+        "--http_endpoint", "0.0.0.0:6962",
+    ]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-k", "http://localhost:6962/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 15s
+    restart: always
+    ports:
+      - "6962:6962"
+  ct-read:
+    image: nginx:1.31.1@sha256:5aca99593157f4ae539a5dec1092a0ad8762f8e2eb1789085a13a0f5622369f6
+    volumes:
+      - ctStorage:/usr/share/nginx/html
+    user: root
+    restart: always
+    ports:
+      - "8000:80"
+volumes:
+  ctStorage: {}
